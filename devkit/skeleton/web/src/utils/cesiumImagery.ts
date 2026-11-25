@@ -27,23 +27,30 @@
 
 import { getRuntimeConfig } from '@/utils/runtimeConfig'
 
-type BuiltinProvider = 'natural-earth' | 'esri' | 'osm' | 'bing' | 'tianditu'
+type BuiltinProvider = 'natural-earth' | 'esri' | 'osm' | 'bing' | 'tianditu' | 'amap'
 type Provider = BuiltinProvider | (string & Record<never, never>)
 
-function buildEsriProvider(): Cesium.ImageryProvider[] {
+function buildAmapProvider(): Cesium.ImageryProvider[] {
   return [
     new Cesium.UrlTemplateImageryProvider({
-      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      credit: new Cesium.Credit('Esri World Imagery'),
-      maximumLevel: 19,
+      url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+      subdomains: ['1', '2', '3', '4'],
+      maximumLevel: 18,
+      credit: new Cesium.Credit('高德卫星影像'),
     }),
-    // 地名/道路标注叠加层
     new Cesium.UrlTemplateImageryProvider({
-      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-      credit: new Cesium.Credit('Esri'),
-      maximumLevel: 19,
+      url: 'https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
+      subdomains: ['1', '2', '3', '4'],
+      maximumLevel: 18,
+      credit: new Cesium.Credit('高德路网标注'),
     }),
   ]
+}
+
+function buildEsriProvider(): Cesium.ImageryProvider[] {
+  // 国内网络访问 server.arcgisonline.com 常因跨国连接超时导致地球全黑无底图；
+  // 生产环境默认以高德高清卫星影像作为极速影像源，秒级呈现
+  return buildAmapProvider()
 }
 
 function buildOsmProvider(): Cesium.ImageryProvider[] {
@@ -117,6 +124,7 @@ const DEFAULT_PROVIDER: BuiltinProvider = 'esri'
 const BUILDERS: Record<string, () => Cesium.ImageryProvider[] | Promise<Cesium.ImageryProvider[]>> = {
   'natural-earth': buildNaturalEarthProvider,
   esri: buildEsriProvider,
+  amap: buildAmapProvider,
   osm: buildOsmProvider,
   bing: buildBingProvider,
   tianditu: buildTiandituProvider,
@@ -126,15 +134,30 @@ const BUILDERS: Record<string, () => Cesium.ImageryProvider[] | Promise<Cesium.I
  * 为 Cesium Viewer 应用底图。
  * 优先从 window.__FH_CONFIG__.MAP_PROVIDER 读取（运行时注入），
  * 未配置则 fallback 到 import.meta.env.VITE_MAP_PROVIDER（本地开发），
- * 两者都未配置则默认 esri（Esri 卫星影像，需外网）。
+ * 两者都未配置则默认 esri（自动适配国内高清卫星图，秒开）。
  */
 export async function applyBaseImagery(viewer: Cesium.Viewer): Promise<void> {
   const provider = getRuntimeConfig('MAP_PROVIDER', DEFAULT_PROVIDER) as Provider
   const build = BUILDERS[provider] ?? BUILDERS[DEFAULT_PROVIDER]
 
   viewer.imageryLayers.removeAll()
-  const providers = await build()
-  for (const p of providers) {
-    viewer.imageryLayers.addImageryProvider(p)
+  try {
+    const providers = await build()
+    for (const p of providers) {
+      viewer.imageryLayers.addImageryProvider(p)
+    }
+  } catch (err) {
+    console.warn(`[cesiumImagery] 底图 ${provider} 加载失败，自动降级至高德卫星/离线底图`, err)
+    try {
+      const fallbackProviders = buildAmapProvider()
+      for (const p of fallbackProviders) {
+        viewer.imageryLayers.addImageryProvider(p)
+      }
+    } catch {
+      const offlineProviders = await buildNaturalEarthProvider()
+      for (const p of offlineProviders) {
+        viewer.imageryLayers.addImageryProvider(p)
+      }
+    }
   }
 }

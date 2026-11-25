@@ -58,4 +58,16 @@ describe('router 调试面板路由注册', () => {
 
     expect(await loadRoutePaths()).not.toContain('/mock-debug')
   })
+
+  it('devices_routes_shouldBeCorrectlyConfigured', async () => {
+    const { router } = await import('@/router/index')
+    const routes = router.getRoutes()
+    const devicesRoute = routes.find(r => r.path === '/devices')
+    const devicesSdkRoute = routes.find(r => r.path === '/devices-sdk')
+    const deviceManagerRoute = routes.find(r => r.path === '/device-manager')
+
+    expect(devicesRoute).toBeDefined()
+    expect(devicesSdkRoute).toBeDefined()
+    expect(deviceManagerRoute).toBeDefined()
+  })
 })

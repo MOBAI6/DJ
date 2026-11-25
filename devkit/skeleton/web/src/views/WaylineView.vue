@@ -241,15 +241,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <!-- 库模式（默认） -->
-  <WaylineLibrary
-    v-if="!isEditorMode"
-    @create="handleCreate"
-    @edit="handleEdit"
-  />
+  <div class="wayline-root">
+    <!-- 库模式（默认） -->
+    <WaylineLibrary
+      v-if="!isEditorMode"
+      @create="handleCreate"
+      @edit="handleEdit"
+    />
 
-  <!-- 编辑器模式 -->
-  <div v-else class="wayline-page">
+    <!-- 编辑器模式 -->
+    <div v-else class="wayline-page">
     <SDKLoadingMask
       :status="status"
       :error-msg="errorMsg"
@@ -272,10 +273,16 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.wayline-root {
+  width: 100%;
+  height: 100%;
+}
+
 .wayline-page {
   position: relative;
   width: 100%;

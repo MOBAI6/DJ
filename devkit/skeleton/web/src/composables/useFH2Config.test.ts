@@ -186,4 +186,10 @@ describe('toWebSocketUrl', () => {
     expect(toWebSocketUrl('http://10.0.0.1:30812', 'duplex/web'))
       .toBe('ws://10.0.0.1:30812/duplex/web')
   })
+
+  it('toWebSocketUrl_shouldResolveRelativeBaseUrl_whenBaseUrlIsRelativePath', () => {
+    // 容器生产部署下 FH2_BASE_URL 常为相对路径 /fh2-gw，不能报 Invalid URL
+    expect(toWebSocketUrl('/fh2-gw', '/openapi/v0.9/notification/ws/v1/notifications'))
+      .toContain('/fh2-gw/openapi/v0.9/notification/ws/v1/notifications')
+  })
 })

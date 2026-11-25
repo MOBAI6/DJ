@@ -17,6 +17,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { getRuntimeConfig } from '@/utils/runtimeConfig'
 import DashboardView     from '@/views/DashboardView.vue'
+import DevicesView       from '@/views/DevicesView.vue'
 import DeviceManagerView from '@/views/DeviceManagerView.vue'
 import CockpitView       from '@/views/CockpitView.vue'
 import WaylineView       from '@/views/WaylineView.vue'
@@ -37,7 +38,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/login',           component: LoginView,         meta: { public: true } },
   { path: '/register',        component: RegisterView,      meta: { public: true } },
   { path: '/',                component: DashboardView },
-  { path: '/devices',         component: DeviceManagerView },
+  { path: '/devices',         component: DevicesView },
+  { path: '/devices-sdk',     component: DeviceManagerView },
   { path: '/device-manager',  redirect: '/devices' },
   { path: '/cockpit',         component: CockpitView },
   { path: '/wayline',         component: WaylineView },

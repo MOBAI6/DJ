@@ -18,10 +18,16 @@ package com.dji.fh.feature.dashboard.spi.sdk;
 
 import com.dji.fh.feature.dashboard.dto.CreateFlightTaskDto;
 import com.dji.fh.feature.dashboard.spi.FlightTaskCommandService;
+import com.dji.fh.kernel.spi.event.DeviceType;
+import com.dji.fh.kernel.spi.query.DeviceQueryService;
+import com.dji.fh.kernel.spi.query.DeviceQueryService.DeviceSnapshot;
 import com.dji.flighthubsdk.FlightHubSDK;
 import com.dji.flighthubsdk.bean.CreateTaskReq;
 import com.dji.flighthubsdk.bean.CreateTaskResp;
 import com.dji.flighthubsdk.bean.EditTaskReq;
+import com.dji.flighthubsdk.bean.TaskDetail;
+import com.dji.flighthubsdk.core.Drone;
+import com.dji.flighthubsdk.core.FlightTaskControlModule;
 import com.dji.flighthubsdk.core.FlightTaskModule;
 import com.dji.flighthubsdk.core.Workspace;
 import java.util.ArrayList;
@@ -46,17 +52,26 @@ public class SdkFlightTaskCommandService implements FlightTaskCommandService {
     private static final Logger LOG = LoggerFactory.getLogger(SdkFlightTaskCommandService.class);
 
     /**
-     * 协议允许下发的任务状态码（{@code UpdateTaskStatusReq} 注释明确仅允许这两个值）：
-     * 0=待开始（平台按计划时间自动调度执行）、6=已挂起（用户主动暂停）。
+     * 状态常量定义（与 TaskDetail 保持一致）：
+     * 0=待开始, 2=执行中, 3=已暂停, 4=已终止, 6=已挂起, 9=准备中, 10=起飞排队中。
      */
-    private static final int STATUS_PENDING_START = 0;
-    private static final int STATUS_SUSPENDED = 6;
+    static final int STATUS_PENDING_START = 0;
+    static final int STATUS_EXECUTING = 2;
+    static final int STATUS_PAUSED = 3;
+    static final int STATUS_TERMINATED = 4;
+    static final int STATUS_SUSPENDED = 6;
+    static final int STATUS_PREPARING = 9;
+    static final int STATUS_QUEUE_FOR_TAKEOFF = 10;
 
-    /** 执行中状态码（2）：协议状态接口不支持下发，仅为保持接口兼容保留于 executeTask */
-    private static final int STATUS_EXECUTING = 2;
+    private final DeviceQueryService deviceQueryService;
 
-    /** 已终止状态码（4）：协议状态接口不支持下发，仅为保持接口兼容保留于 cancelTask */
-    private static final int STATUS_TERMINATED = 4;
+    public SdkFlightTaskCommandService() {
+        this(null);
+    }
+
+    public SdkFlightTaskCommandService(DeviceQueryService deviceQueryService) {
+        this.deviceQueryService = deviceQueryService;
+    }
 
     /** repeat_type 的「不重复」取值（kcron RepeatType.NonRepeating），前端无条件下发的默认值 */
     private static final int REPEAT_TYPE_NONE = 0;
@@ -167,21 +182,201 @@ public class SdkFlightTaskCommandService implements FlightTaskCommandService {
     }
 
     /**
-     * 暂停任务：下发状态 6（已挂起），协议允许。
+     * 暂停任务。
+     *
+     * <p>根据当前任务状态执行差异化控制：
+     * <ul>
+     *   <li>执行中(2) / 准备中(9) / 排队中(10)：反查关联飞行器，通过 {@code FlightTaskControlModule.pause()} 下发空中悬停；</li>
+     *   <li>已暂停(3)：幂等确认下发暂停；</li>
+     *   <li>待开始(0)：下发状态 6 挂起工作空间计划调度；</li>
+     *   <li>已挂起(6)：幂等忽略；</li>
+     *   <li>其他终态：抛出 {@link SdkBridge.SdkQueryException}。</li>
+     * </ul>
      */
     @Override
     public void pauseTask(String taskUuid) {
-        updateStatus(taskUuid, STATUS_SUSPENDED, "暂停");
+        TaskDetail detail = getTaskDetail(taskUuid);
+        int status = detail.getStatus();
+
+        switch (status) {
+            case STATUS_EXECUTING, STATUS_PREPARING, STATUS_QUEUE_FOR_TAKEOFF -> {
+                controlDronePause(taskUuid, detail);
+            }
+            case STATUS_PAUSED -> {
+                LOG.info("任务已处于暂停态，尝试再次确认下发暂停指令: taskUuid={}", taskUuid);
+                controlDronePause(taskUuid, detail);
+            }
+            case STATUS_PENDING_START -> {
+                updateStatus(taskUuid, STATUS_SUSPENDED, "暂停");
+            }
+            case STATUS_SUSPENDED -> {
+                LOG.info("任务已处于挂起状态，无需重复暂停: taskUuid={}", taskUuid);
+            }
+            default -> {
+                throw new SdkBridge.SdkQueryException("任务当前状态无法暂停: status=" + status);
+            }
+        }
     }
 
     /**
-     * 恢复任务：下发状态 0（待开始），协议允许。
+     * 恢复任务。
      *
-     * <p>平台将挂起任务改回"待开始"后会按计划时间重新调度执行。
+     * <p>根据当前任务状态执行差异化控制：
+     * <ul>
+     *   <li>已暂停(3) / 执行中(2)：反查关联飞行器，通过 {@code FlightTaskControlModule.resume()} 下发恢复航线；</li>
+     *   <li>已挂起(6)：下发状态 0 恢复工作空间计划调度；</li>
+     *   <li>待开始(0)：幂等忽略；</li>
+     *   <li>其他终态：抛出 {@link SdkBridge.SdkQueryException}。</li>
+     * </ul>
      */
     @Override
     public void resumeTask(String taskUuid) {
-        updateStatus(taskUuid, STATUS_PENDING_START, "恢复");
+        TaskDetail detail = getTaskDetail(taskUuid);
+        int status = detail.getStatus();
+
+        switch (status) {
+            case STATUS_PAUSED, STATUS_EXECUTING -> {
+                controlDroneResume(taskUuid, detail);
+            }
+            case STATUS_SUSPENDED -> {
+                updateStatus(taskUuid, STATUS_PENDING_START, "恢复");
+            }
+            case STATUS_PENDING_START -> {
+                LOG.info("任务已处于待开始调度状态，无需重复恢复: taskUuid={}", taskUuid);
+            }
+            default -> {
+                throw new SdkBridge.SdkQueryException("任务当前状态无法恢复: status=" + status);
+            }
+        }
+    }
+
+    private void controlDronePause(String taskUuid, TaskDetail detail) {
+        FlightTaskControlModule ctrl = getFlightTaskControlModuleForTask(taskUuid, detail, "暂停");
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        ctrl.pause(error -> {
+            if (!error.isSuccess()) {
+                future.completeExceptionally(new SdkBridge.SdkQueryException(
+                        "暂停任务失败: " + error.getServerMessage()));
+                return;
+            }
+            future.complete(null);
+        });
+
+        SdkBridge.await(future);
+        LOG.info("SDK 暂停飞行任务成功(飞行器级): taskUuid={}", taskUuid);
+    }
+
+    private void controlDroneResume(String taskUuid, TaskDetail detail) {
+        FlightTaskControlModule ctrl = getFlightTaskControlModuleForTask(taskUuid, detail, "恢复");
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        ctrl.resume(error -> {
+            if (!error.isSuccess()) {
+                future.completeExceptionally(new SdkBridge.SdkQueryException(
+                        "恢复任务失败: " + error.getServerMessage()));
+                return;
+            }
+            future.complete(null);
+        });
+
+        SdkBridge.await(future);
+        LOG.info("SDK 恢复飞行任务成功(飞行器级): taskUuid={}", taskUuid);
+    }
+
+    private FlightTaskControlModule getFlightTaskControlModuleForTask(
+            String taskUuid, TaskDetail detail, String actionLabel) {
+        String taskDeviceSn = detail.getSn();
+        String droneSn = resolveDroneSn(taskDeviceSn);
+        if (droneSn == null || droneSn.isBlank()) {
+            throw new SdkBridge.SdkQueryException(actionLabel + "任务失败: 无法解析飞行器 SN, taskUuid=" + taskUuid);
+        }
+
+        Drone drone = getDrone(droneSn);
+        if (drone == null) {
+            throw new SdkBridge.SdkQueryException(actionLabel + "任务失败: 飞行器实例不可用, droneSn=" + droneSn);
+        }
+
+        FlightTaskControlModule ctrl = drone.getFlightTaskControlModule();
+        if (ctrl == null) {
+            throw new SdkBridge.SdkQueryException(
+                    actionLabel + "任务失败: FlightTaskControlModule 不可用, droneSn=" + droneSn);
+        }
+        return ctrl;
+    }
+
+    /**
+     * 解析任务关联的飞行器 SN。
+     *
+     * <p>通过 {@link DeviceQueryService#listDevices()} 查找设备。
+     * 若当前设备是 DRONE 则直接返回；
+     * 若当前设备有 subDevices 且包含 DRONE 则返回子设备 SN；
+     * 若匹配不到则兜底返回 taskDeviceSn。防御空指针与查询异常。
+     *
+     * @param taskDeviceSn 任务关联的设备 SN（通常为机场 SN 或无人机 SN）
+     * @return 解析出的无人机 SN，失败时兜底返回 taskDeviceSn
+     */
+    String resolveDroneSn(String taskDeviceSn) {
+        if (taskDeviceSn == null || taskDeviceSn.isBlank() || deviceQueryService == null) {
+            return taskDeviceSn;
+        }
+        try {
+            List<DeviceSnapshot> devices = deviceQueryService.listDevices();
+            if (devices == null) {
+                return taskDeviceSn;
+            }
+            for (DeviceSnapshot device : devices) {
+                if (device != null && taskDeviceSn.equals(device.sn())) {
+                    if (isDroneDevice(device)) {
+                        return device.sn();
+                    }
+                    if (device.subDevices() != null) {
+                        for (DeviceSnapshot sub : device.subDevices()) {
+                            if (isDroneDevice(sub) && sub.sn() != null && !sub.sn().isBlank()) {
+                                return sub.sn();
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("解析飞行器 SN 发生异常，降级返回任务设备 SN: taskDeviceSn={}, error={}",
+                    taskDeviceSn, e.getMessage());
+        }
+        return taskDeviceSn;
+    }
+
+    private static boolean isDroneDevice(DeviceSnapshot device) {
+        return device != null && device.deviceClass() != null
+                && DeviceType.DRONE.name().equalsIgnoreCase(device.deviceClass().trim());
+    }
+
+    /**
+     * 获取飞行器实例（package-private 便于单元测试覆写注入 mock）。
+     */
+    Drone getDrone(String droneSn) {
+        return FlightHubSDK.getDroneInstance(droneSn);
+    }
+
+    /**
+     * 获取任务详情（package-private 便于单元测试注入或验证）。
+     */
+    TaskDetail getTaskDetail(String taskUuid) {
+        FlightTaskModule ftm = getFlightTaskModule();
+
+        CompletableFuture<TaskDetail> future = new CompletableFuture<>();
+        ftm.getFlightTaskDetail(taskUuid, (error, detail) -> {
+            if (!error.isSuccess()) {
+                future.completeExceptionally(new SdkBridge.SdkQueryException(
+                        "查询任务详情失败: " + error.getServerMessage()));
+                return;
+            }
+            future.complete(detail);
+        });
+
+        TaskDetail detail = SdkBridge.await(future);
+        if (detail == null) {
+            throw new SdkBridge.SdkQueryException("查询任务详情失败: 服务端返回空详情");
+        }
+        return detail;
     }
 
     /**

@@ -71,8 +71,8 @@ public class SdkDashboardAutoConfiguration {
     }
 
     @Bean
-    public FlightTaskCommandService flightTaskCommandService() {
-        return new SdkFlightTaskCommandService();
+    public FlightTaskCommandService flightTaskCommandService(DeviceQueryService deviceQueryService) {
+        return new SdkFlightTaskCommandService(deviceQueryService);
     }
 
     @Bean

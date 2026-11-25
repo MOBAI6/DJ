@@ -33,8 +33,17 @@ const NOTIFICATION_WS_PATH = '/openapi/v0.9/notification/ws/v1/notifications'
  * @return WebSocket 地址
  */
 export function toWebSocketUrl(baseUrl: string, path: string): string {
-  const url = new URL(baseUrl)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  // baseUrl 可能是相对路径（如容器部署配置的同源反代前缀 /fh2-gw），需按当前页面 origin 解析为绝对 URL
+  const base =
+    typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : 'http://localhost'
+  const url = new URL(baseUrl, base)
+  const isHttps =
+    (typeof window !== 'undefined' && window.location?.protocol === 'https:') ||
+    url.protocol === 'https:' ||
+    url.protocol === 'wss:'
+  url.protocol = isHttps ? 'wss:' : 'ws:'
   const prefix = url.pathname.replace(/\/+$/, '')
   const suffix = path.startsWith('/') ? path : `/${path}`
   url.pathname = `${prefix}${suffix}`
@@ -95,10 +104,25 @@ export function useFH2Config(): FH2ConfigResult {
     )
   }
 
+  const rawAssetHost = getRuntimeConfig('FH2_ASSET_HOST')
+  const rawBaseUrl   = getRuntimeConfig('FH2_BASE_URL')
+
+  const baseOrigin =
+    typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : ''
+
   // assetHost 与 baseUrl 默认直连 FH2，可分别用 FH2_ASSET_HOST / FH2_BASE_URL 覆盖为
   // 同源反代前缀（骨架 nginx 反代），使浏览器只与自身源通信，规避 FH2 无 CORS 头的跨域拦截。
-  const address = getRuntimeConfig('FH2_ASSET_HOST') || rawAddress
-  const baseUrl = getRuntimeConfig('FH2_BASE_URL') || `${rawAddress}:${port}`
+  // 若配置了相对路径前缀（如 /fh2-assets、/fh2-gw），在浏览器端安全补全为同源绝对地址，
+  // 确保向第三方 SDK 传递绝对 URL，防止其内部 new URL() 报 Invalid URL。
+  const address = rawAssetHost
+    ? (rawAssetHost.startsWith('/') && baseOrigin ? `${baseOrigin}${rawAssetHost}` : rawAssetHost)
+    : rawAddress
+
+  const baseUrl = rawBaseUrl
+    ? (rawBaseUrl.startsWith('/') && baseOrigin ? `${baseOrigin}${rawBaseUrl}` : rawBaseUrl)
+    : `${rawAddress}:${port}`
 
   // wss 默认从 baseUrl 推导（协议随 https 切 wss、保留同源反代前缀），
   // 可用 FH2_WSS_URL 覆盖为任意地址。

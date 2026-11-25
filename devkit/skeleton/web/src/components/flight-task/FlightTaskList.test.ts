@@ -20,9 +20,10 @@ import FlightTaskList from './FlightTaskList.vue'
 import type { FlightTaskInfo, FlightTaskListResponse } from '@/types/flightTask'
 
 // vi.mock 工厂会被提升到 import 之前执行，因此被引用的 mock 必须用 vi.hoisted 一并提升
-const { mockPush, mockFetchFlightTaskList } = vi.hoisted(() => ({
+const { mockPush, mockFetchFlightTaskList, mockFetchFlightTaskDetail } = vi.hoisted(() => ({
   mockPush: vi.fn(),
   mockFetchFlightTaskList: vi.fn(),
+  mockFetchFlightTaskDetail: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -31,6 +32,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/api/flightTask', () => ({
   fetchFlightTaskList: (...args: unknown[]) => mockFetchFlightTaskList(...args),
+  fetchFlightTaskDetail: (...args: unknown[]) => mockFetchFlightTaskDetail(...args),
   pauseFlightTask: vi.fn(),
   resumeFlightTask: vi.fn(),
   deleteFlightTask: vi.fn(),
@@ -48,6 +50,7 @@ function buildTask(
     createdAt: 1721030400,
     distanceMeters: 0,
     minBatteryCapacity: 0,
+    isBreakPointResume: false,
     ...overrides,
   }
 }
@@ -123,5 +126,78 @@ describe('FlightTaskList 时间冲突标识', () => {
 
     expect(wrapper.find('.conflict-badge').exists()).toBe(false)
     expect(wrapper.text()).toContain('旧接口任务')
+  })
+})
+
+describe('FlightTaskList 详情弹窗与飞行记录操作', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockFetchFlightTaskDetail.mockResolvedValue({
+      taskUuid: 'u1',
+      name: '测试任务1',
+      sn: 'SN001',
+      deviceName: '1号机场',
+      status: 'SUCCESS',
+      taskType: 2,
+      waylineUuid: 'wl-001',
+      waylineName: '主巡检航线',
+      beginAt: 1721030400,
+      endAt: 1721034000,
+      rthAltitude: 100,
+      rthMode: 0,
+      outOfControlActionInFlight: 1,
+      waylinePrecisionType: 0,
+      minBatteryCapacity: 0,
+      isBreakPointResume: false,
+    })
+  })
+
+  it('renders_shouldOpenDetailModal_whenRowClicked', async () => {
+    const wrapper = await mountList([
+      buildTask({ taskUuid: 'u1', name: '测试任务1' }),
+    ])
+
+    expect(wrapper.find('.detail-modal-overlay').exists()).toBe(false)
+
+    const row = wrapper.find('.task-row')
+    await row.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.detail-modal-overlay').exists()).toBe(true)
+    expect(mockFetchFlightTaskDetail).toHaveBeenCalledWith('u1')
+  })
+
+  it('renders_shouldOpenDetailModal_whenDetailButtonClicked', async () => {
+    const wrapper = await mountList([
+      buildTask({ taskUuid: 'u1', name: '测试任务1' }),
+    ])
+
+    expect(wrapper.find('.detail-modal-overlay').exists()).toBe(false)
+
+    const detailBtn = wrapper.find('.action-btn.detail')
+    expect(detailBtn.exists()).toBe(true)
+    await detailBtn.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.detail-modal-overlay').exists()).toBe(true)
+  })
+
+  it('actions_shouldShowReplayButton_forSuccessOrFailedStatus_andNavigate', async () => {
+    const wrapper = await mountList([
+      buildTask({ taskUuid: 'u-success', name: '成功任务', status: 'SUCCESS', waylineUuid: 'wl-1' }),
+      buildTask({ taskUuid: 'u-failed', name: '失败任务', status: 'FAILED', waylineUuid: 'wl-2' }),
+      buildTask({ taskUuid: 'u-executing', name: '执行中任务', status: 'EXECUTING', waylineUuid: 'wl-3' }),
+    ])
+
+    const replayBtns = wrapper.findAll('.action-btn.replay')
+    expect(replayBtns).toHaveLength(2)
+    expect(replayBtns[0].text()).toContain('查看飞行记录')
+    expect(replayBtns[1].text()).toContain('查看飞行记录')
+
+    await replayBtns[0].trigger('click')
+    expect(mockPush).toHaveBeenCalledWith({
+      path: '/flight-replay',
+      query: { task_id: 'u-success', wayline_uuid: 'wl-1' },
+    })
   })
 })

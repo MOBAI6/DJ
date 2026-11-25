@@ -132,8 +132,7 @@ onMounted(async () => {
         mode: 'internal',
         container: '#map-app-global',
         env: {
-          cesiumBaseUrl: (window as Record<string, unknown>).CESIUM_BASE_URL as string
-            || `${cfg.address}/paasjs-demo/sdk-runtime/cesium/`,
+          cesiumBaseUrl: `${cfg.address}/paasjs-demo/sdk-runtime/cesium/`,
           terrainKey: '',
           featureGateway: [],
         },
@@ -167,6 +166,11 @@ onMounted(async () => {
     player.on('error', (e: unknown) => {
       const err = e as { code: number; message: string }
       console.error('[FlyDataReplay] error:', err.code, err.message)
+      if (err.code === 219017 || String(err.message).includes('track not found')) {
+        markError(new Error('当前飞行任务尚未结束并上报航迹（状态为执行中/待开始），底座暂无三维航迹记录。请待飞行任务执行完成后再查看回放。'))
+      } else {
+        markError(new Error(err.message || '加载飞行记录回放失败'))
+      }
     })
 
     player.on('back', () => {
@@ -197,7 +201,12 @@ onMounted(async () => {
 
     markReady()
   } catch (e: unknown) {
-    markError(e)
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('track not found') || msg.includes('404') || msg.includes('219017')) {
+      markError(new Error('当前飞行任务尚未结束并上报航迹（状态为执行中/待开始），底座暂无三维航迹记录。请待飞行任务执行完成后再查看回放。'))
+    } else {
+      markError(e)
+    }
   }
 })
 

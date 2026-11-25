@@ -201,6 +201,18 @@ npm run test       # 运行测试
 
 前端使用 `authFetch()` 封装所有 API 请求，自动附加 JWT token 并处理 401 跳转登录。
 
+## 纯本地运行模式缺失功能与后续完善说明
+
+当前在未连接远程 FH2 PaaS 底座、使用本地 `FH_SKELETON_PROFILE=mock` + MySQL `fh_skeleton` 启动时，顶部导航所有页面均可正常进入，但部分强依赖底座 UMD SDK 或真实设备的能力处于 Mock / 待补齐状态（完整技术对照表亦同步维护于 [docs/SPEC.md](docs/SPEC.md) 第五章）：
+
+1. **直播大屏（`/live-stream`）**：`DJILivePlayer` UMD 脚本依赖 FH2 PaaS 服务（`VITE_FH2_ADDRESS`）；本地纯离线使用需补齐本地流媒体播放器兜底（如 WHEP/WebRTC/示例视频流）及设备列表快捷选流。
+2. **设备管理（`/devices`）**：前端左树右表、双 `listenId`、机场快照与 OSD 变更流水已就绪，但后端 `DeviceRestController` 尚未实现 `/listen-ids`、`/{sn}/dock-snapshot` 与 `/topology` 接口，当前依赖前端示范拓扑兜底；需补齐后端接口并接入 WebSocket 实时推送。
+3. **驾驶舱（`/cockpit`）**：官方标准驾驶舱与设备小窗强依赖 `window.FH2`；「数字孪生 FOV 驾驶舱」可在本地渲染 Cesium 视口，但需在 `feature-sei-osd` 补充 Mock 飞行遥测驱动，并将顶栏「巡检简报」与工具栏「AI 标定」弹窗的静态数据对接到真实后端业务接口。
+4. **航线管理（`/wayline`）**：默认 `WaylineService` 返回空列表且导入/下载/删除为空实现，航线编辑器强依赖 `window.WaylineEditor`；需在后端补充 `.kmz` 文件解析与存储（如预置 `sample-waylines/standard_patrol_wayline.kmz`），并在前端提供基于 Cesium 的离线航点标绘与预览能力。
+5. **任务管理与飞行记录（`/flight-tasks`、`/flight-replay`）**：`MockFlightTaskCommandService` 创建/编辑/暂停/恢复/取消目前仅记录日志而不持久化状态，`FlyDataReplay` 回放依赖底座 SDK；需补充有状态任务库及离线 Cesium 轨迹回放兜底。
+6. **媒体管理（`/media`）与模型库（`/models`）**：默认 `MediaService` 返回空列表且不支持下载，`ModelsView` 暂不支持模型文件下载；需补充本地媒体文件存储与 3D Tiles 静态资源服务。
+7. **数据看板（`/`）与空域管理（`/flight-areas`）**：空域管理已持久化至 MySQL（`t_flight_area`），后续需补充设备同步；数据看板需由 Mock 统计切换为真实业务模块聚合。
+
 ## 运行测试
 
 ```bash

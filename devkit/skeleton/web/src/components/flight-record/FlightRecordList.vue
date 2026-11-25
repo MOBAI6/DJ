@@ -125,12 +125,20 @@ function goToReplay(taskUuid: string, waylineUuid: string): void {
             <td class="col-time">{{ formatDateTime(task.createdAt) }}</td>
             <td class="col-action">
               <button
+                v-if="task.status === 'SUCCESS' || task.status === 'FAILED'"
                 class="replay-btn"
                 @click.stop="goToReplay(task.taskUuid, task.waylineUuid)"
               >
                 <Play :size="12" :stroke-width="2" />
                 回放
               </button>
+              <span
+                v-else
+                class="pending-tip"
+                title="任务飞行结束并上报航迹后即可回放"
+              >
+                进行中
+              </span>
             </td>
           </tr>
         </tbody>
@@ -365,6 +373,15 @@ function goToReplay(taskUuid: string, waylineUuid: string): void {
   background: var(--app-primary);
   border-color: var(--app-primary);
   color: #ffffff;
+}
+
+.pending-tip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--app-text-muted);
+  background: var(--app-bg-muted);
+  border-radius: 10px;
 }
 
 /* ── 空状态 / 加载状态 ── */

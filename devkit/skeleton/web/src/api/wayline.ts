@@ -27,6 +27,16 @@ function isMockEnabled(): boolean {
 
 const MOCK_WAYLINES: WaylineInfo[] = [
   {
+    uuid: '974e1a6f-37af-433c-b943-b7836ca5327d',
+    name: '示范园区标准巡检航线-01 (M30T/4航点/闭环)',
+    droneType: 'Matrice 30T',
+    payloadType: 'Zenmuse H20T',
+    waylineType: '航点航线',
+    waypointCount: 4,
+    estimatedDistance: 1130,
+    updatedAt: 1795420237,
+  },
+  {
     uuid: 'wl-001-abc',
     name: '厂区北侧巡检航线',
     droneType: 'Matrice 350 RTK',

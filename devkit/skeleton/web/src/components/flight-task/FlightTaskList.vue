@@ -17,7 +17,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { RefreshCw, Play, Pause, XCircle, Plus, Pencil, Trash2, AlertTriangle } from 'lucide-vue-next'
+import { RefreshCw, Play, Pause, XCircle, Plus, Pencil, Trash2, AlertTriangle, FileText } from 'lucide-vue-next'
 import { useFlightTaskList } from '@/composables/useFlightTaskList'
 import { pauseFlightTask, resumeFlightTask, deleteFlightTask } from '@/api/flightTask'
 import type { FlightTaskInfo } from '@/types/flightTask'
@@ -29,6 +29,7 @@ import {
 } from '@/types/flightTask'
 import MediaPagination from '@/components/media/MediaPagination.vue'
 import TaskTypeLabel from './TaskTypeLabel.vue'
+import FlightTaskDetailModal from './FlightTaskDetailModal.vue'
 import { getEditBlockTip, isTaskEditable } from '@/utils/flightTaskEditability'
 import { formatDateTime } from '@/utils/format'
 
@@ -47,6 +48,13 @@ const {
 } = useFlightTaskList()
 
 const actionLoading = ref<string | null>(null)
+const selectedTask = ref<FlightTaskInfo | null>(null)
+const detailModalVisible = ref(false)
+
+function openDetail(task: FlightTaskInfo): void {
+  selectedTask.value = task
+  detailModalVisible.value = true
+}
 
 /**
  * 协议约束：任务状态接口（UpdateTaskStatusReq）仅允许下发 0（待开始）和
@@ -162,7 +170,7 @@ async function handleResume(taskUuid: string): Promise<void> {
             v-for="task in tasks"
             :key="task.taskUuid"
             class="task-row"
-            @click="goToReplay(task.taskUuid, task.waylineUuid)"
+            @click="openDetail(task)"
           >
             <td class="col-name">
               <span class="task-name">{{ task.name }}</span>
@@ -195,6 +203,14 @@ async function handleResume(taskUuid: string): Promise<void> {
             </td>
             <td class="col-time">{{ formatDateTime(task.createdAt) }}</td>
             <td class="col-action" @click.stop>
+              <!-- 详情 -->
+              <button
+                class="action-btn detail"
+                @click="openDetail(task)"
+              >
+                <FileText :size="12" />
+                详情
+              </button>
               <!-- CREATED: 执行（协议不支持手动执行；定时任务额外提示将按预定时间自动触发）/ 编辑 / 删除 -->
               <button
                 v-if="task.status === 'CREATED'"
@@ -265,14 +281,14 @@ async function handleResume(taskUuid: string): Promise<void> {
                 <Play :size="12" />
                 恢复
               </button>
-              <!-- SUCCESS/FAILED: 回放 -->
+              <!-- SUCCESS/FAILED: 查看飞行记录 -->
               <button
                 v-if="task.status === 'SUCCESS' || task.status === 'FAILED'"
                 class="action-btn replay"
                 @click="goToReplay(task.taskUuid, task.waylineUuid)"
               >
                 <Play :size="12" />
-                回放
+                查看飞行记录
               </button>
             </td>
           </tr>
@@ -293,6 +309,14 @@ async function handleResume(taskUuid: string): Promise<void> {
       @next-page="nextPage"
       @prev-page="prevPage"
       @change-page-size="changePageSize"
+    />
+
+    <!-- 任务详情弹窗 -->
+    <FlightTaskDetailModal
+      v-model:visible="detailModalVisible"
+      :task-uuid="selectedTask?.taskUuid"
+      :task="selectedTask"
+      @refresh="fetchTasks"
     />
   </div>
 </template>
@@ -518,6 +542,16 @@ async function handleResume(taskUuid: string): Promise<void> {
 .action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.action-btn.detail {
+  color: var(--app-text);
+  border-color: var(--app-border);
+}
+
+.action-btn.detail:hover {
+  background: var(--app-hover-bg);
+  color: var(--app-primary);
 }
 
 .action-btn.execute {

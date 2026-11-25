@@ -23,17 +23,26 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.dji.fh.feature.dashboard.dto.CreateFlightTaskDto;
+import com.dji.fh.kernel.spi.query.DeviceQueryService;
+import com.dji.fh.kernel.spi.query.DeviceQueryService.DeviceSnapshot;
 import com.dji.flighthubsdk.FlightHubCallback;
 import com.dji.flighthubsdk.bean.CreateTaskReq;
 import com.dji.flighthubsdk.bean.CreateTaskResp;
 import com.dji.flighthubsdk.bean.EditTaskReq;
 import com.dji.flighthubsdk.bean.FlightHubError;
+import com.dji.flighthubsdk.bean.TaskDetail;
+import com.dji.flighthubsdk.core.Drone;
+import com.dji.flighthubsdk.core.FlightTaskControlModule;
 import com.dji.flighthubsdk.core.FlightTaskModule;
 import com.dji.flighthubsdk.generated.FlightHubSdkErrorCode;
 import java.util.Collections;
@@ -57,13 +66,14 @@ class SdkFlightTaskCommandServiceTest {
 
     private static final String TASK_UUID = "task-uuid-001";
 
-    /** 协议允许下发的状态码：0=待开始，6=已挂起（UpdateTaskStatusReq） */
+    /** 状态常量定义（与 TaskDetail 保持一致） */
     private static final int STATUS_PENDING_START = 0;
-    private static final int STATUS_SUSPENDED = 6;
-
-    /** 协议不支持下发、仅为保持 SPI 接口完整保留的状态码：2=执行中，4=已终止 */
     private static final int STATUS_EXECUTING = 2;
+    private static final int STATUS_PAUSED = 3;
     private static final int STATUS_TERMINATED = 4;
+    private static final int STATUS_SUSPENDED = 6;
+    private static final int STATUS_PREPARING = 9;
+    private static final int STATUS_QUEUE_FOR_TAKEOFF = 10;
 
     private static final String DOCK_SN = "8UUXN5F00A08FT";
     private static final String WAYLINE_UUID = "wl-001";
@@ -72,6 +82,9 @@ class SdkFlightTaskCommandServiceTest {
     private static final String RESUMABLE_STATUS_FIELD = "resumable_status";
 
     private FlightTaskModule flightTaskModule;
+    private DeviceQueryService deviceQueryService;
+    private Drone drone;
+    private FlightTaskControlModule flightTaskControlModule;
     private SdkFlightTaskCommandService service;
 
     /** 每次状态更新调用收到的 taskUuid，按调用记录 */
@@ -92,14 +105,25 @@ class SdkFlightTaskCommandServiceTest {
     @BeforeEach
     void setUp() {
         flightTaskModule = mock(FlightTaskModule.class);
+        deviceQueryService = mock(DeviceQueryService.class);
+        drone = mock(Drone.class);
+        flightTaskControlModule = mock(FlightTaskControlModule.class);
+
+        when(drone.getFlightTaskControlModule()).thenReturn(flightTaskControlModule);
+
         capturedUuid = null;
         capturedStatus = null;
         capturedCreateReq = null;
 
-        service = new SdkFlightTaskCommandService() {
+        service = new SdkFlightTaskCommandService(deviceQueryService) {
             @Override
             FlightTaskModule getFlightTaskModule() {
                 return flightTaskModule;
+            }
+
+            @Override
+            Drone getDrone(String droneSn) {
+                return drone;
             }
         };
 
@@ -115,7 +139,94 @@ class SdkFlightTaskCommandServiceTest {
     }
 
     @Test
-    void pauseTask_shouldUpdateStatusToSuspended_whenTaskUuidProvided() {
+    void resolveDroneSn_shouldReturnDirectSn_whenDeviceIsDrone() {
+        DeviceSnapshot droneDevice = new DeviceSnapshot(
+                "DRONE-001", "DRONE", "1-67-0", "Drone 1", "d1", true);
+        when(deviceQueryService.listDevices()).thenReturn(List.of(droneDevice));
+
+        String resolved = service.resolveDroneSn("DRONE-001");
+
+        assertThat(resolved).isEqualTo("DRONE-001");
+    }
+
+    @Test
+    void resolveDroneSn_shouldReturnSubDeviceSn_whenDeviceIsDockWithDroneSubDevice() {
+        DeviceSnapshot subDrone = new DeviceSnapshot(
+                "DRONE-SUB-001", "DRONE", "1-67-0", "Drone Sub", "ds1", true);
+        DeviceSnapshot dockDevice = new DeviceSnapshot(
+                DOCK_SN, "DOCK", "1-90-0", "Dock 1", "dock1", true, List.of(subDrone));
+        when(deviceQueryService.listDevices()).thenReturn(List.of(dockDevice));
+
+        String resolved = service.resolveDroneSn(DOCK_SN);
+
+        assertThat(resolved).isEqualTo("DRONE-SUB-001");
+    }
+
+    @Test
+    void resolveDroneSn_shouldFallbackToTaskDeviceSn_whenNoDeviceMatched() {
+        when(deviceQueryService.listDevices()).thenReturn(Collections.emptyList());
+
+        String resolved = service.resolveDroneSn("UNKNOWN_SN");
+
+        assertThat(resolved).isEqualTo("UNKNOWN_SN");
+    }
+
+    @Test
+    void resolveDroneSn_shouldFallbackToTaskDeviceSn_whenDeviceQueryServiceIsNull() {
+        SdkFlightTaskCommandService serviceWithoutQuery = new SdkFlightTaskCommandService(null);
+
+        String resolved = serviceWithoutQuery.resolveDroneSn("FALLBACK_SN");
+
+        assertThat(resolved).isEqualTo("FALLBACK_SN");
+    }
+
+    @Test
+    void resolveDroneSn_shouldFallbackToTaskDeviceSn_whenListDevicesThrowsException() {
+        when(deviceQueryService.listDevices()).thenThrow(new RuntimeException("Query timeout"));
+
+        String resolved = service.resolveDroneSn("ERROR_SN");
+
+        assertThat(resolved).isEqualTo("ERROR_SN");
+    }
+
+    @Test
+    void pauseTask_shouldTriggerDronePause_whenTaskIsExecuting() {
+        stubTaskDetailSuccess(STATUS_EXECUTING, DOCK_SN);
+        stubDronePauseSuccess();
+
+        service.pauseTask(TASK_UUID);
+
+        verify(flightTaskControlModule).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+        verify(flightTaskModule, never()).updateFlightTaskStatus(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void pauseTask_shouldTriggerDronePause_whenTaskIsPreparingOrQueuing() {
+        stubTaskDetailSuccess(STATUS_PREPARING, DOCK_SN);
+        stubDronePauseSuccess();
+
+        service.pauseTask(TASK_UUID);
+
+        verify(flightTaskControlModule).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+
+        stubTaskDetailSuccess(STATUS_QUEUE_FOR_TAKEOFF, DOCK_SN);
+        service.pauseTask(TASK_UUID);
+        verify(flightTaskControlModule, times(2)).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    @Test
+    void pauseTask_shouldTriggerDronePause_whenTaskIsPaused() {
+        stubTaskDetailSuccess(STATUS_PAUSED, DOCK_SN);
+        stubDronePauseSuccess();
+
+        service.pauseTask(TASK_UUID);
+
+        verify(flightTaskControlModule).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    @Test
+    void pauseTask_shouldUpdateStatusToSuspended_whenTaskIsPendingStart() {
+        stubTaskDetailSuccess(STATUS_PENDING_START, DOCK_SN);
         stubStatusCallbackSuccess();
 
         service.pauseTask(TASK_UUID);
@@ -125,13 +236,142 @@ class SdkFlightTaskCommandServiceTest {
     }
 
     @Test
-    void resumeTask_shouldUpdateStatusToPendingStart_whenTaskUuidProvided() {
+    void pauseTask_shouldIgnore_whenTaskIsSuspended() {
+        stubTaskDetailSuccess(STATUS_SUSPENDED, DOCK_SN);
+
+        service.pauseTask(TASK_UUID);
+
+        verify(flightTaskControlModule, never()).pause(any());
+        verify(flightTaskModule, never()).updateFlightTaskStatus(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenTaskInTerminalState() {
+        stubTaskDetailSuccess(STATUS_TERMINATED, DOCK_SN);
+
+        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("任务当前状态无法暂停: status=4");
+    }
+
+    @Test
+    void resumeTask_shouldTriggerDroneResume_whenTaskIsPaused() {
+        stubTaskDetailSuccess(STATUS_PAUSED, DOCK_SN);
+        stubDroneResumeSuccess();
+
+        service.resumeTask(TASK_UUID);
+
+        verify(flightTaskControlModule).resume(any(FlightHubCallback.ResultCallbackWithError.class));
+        verify(flightTaskModule, never()).updateFlightTaskStatus(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void resumeTask_shouldTriggerDroneResume_whenTaskIsExecuting() {
+        stubTaskDetailSuccess(STATUS_EXECUTING, DOCK_SN);
+        stubDroneResumeSuccess();
+
+        service.resumeTask(TASK_UUID);
+
+        verify(flightTaskControlModule).resume(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    @Test
+    void resumeTask_shouldUpdateStatusToPendingStart_whenTaskIsSuspended() {
+        stubTaskDetailSuccess(STATUS_SUSPENDED, DOCK_SN);
         stubStatusCallbackSuccess();
 
         service.resumeTask(TASK_UUID);
 
         assertThat(capturedUuid).isEqualTo(TASK_UUID);
         assertThat(capturedStatus).isEqualTo(STATUS_PENDING_START);
+    }
+
+    @Test
+    void resumeTask_shouldIgnore_whenTaskIsPendingStart() {
+        stubTaskDetailSuccess(STATUS_PENDING_START, DOCK_SN);
+
+        service.resumeTask(TASK_UUID);
+
+        verify(flightTaskControlModule, never()).resume(any());
+        verify(flightTaskModule, never()).updateFlightTaskStatus(anyString(), anyInt(), any());
+    }
+
+    @Test
+    void resumeTask_shouldThrowSdkQueryException_whenTaskInTerminalState() {
+        stubTaskDetailSuccess(STATUS_TERMINATED, DOCK_SN);
+
+        assertThatThrownBy(() -> service.resumeTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("任务当前状态无法恢复: status=4");
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenDroneNotFound() {
+        stubTaskDetailSuccess(STATUS_EXECUTING, DOCK_SN);
+        SdkFlightTaskCommandService serviceWithNoDrone = new SdkFlightTaskCommandService(deviceQueryService) {
+            @Override
+            FlightTaskModule getFlightTaskModule() {
+                return flightTaskModule;
+            }
+
+            @Override
+            Drone getDrone(String droneSn) {
+                return null;
+            }
+        };
+
+        assertThatThrownBy(() -> serviceWithNoDrone.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("飞行器实例不可用");
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenFlightTaskControlModuleNull() {
+        stubTaskDetailSuccess(STATUS_EXECUTING, DOCK_SN);
+        when(drone.getFlightTaskControlModule()).thenReturn(null);
+
+        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("FlightTaskControlModule 不可用");
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenDronePauseCallbackReturnsFailure() {
+        stubTaskDetailSuccess(STATUS_EXECUTING, DOCK_SN);
+        stubDronePauseFailure();
+
+        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("暂停任务失败");
+    }
+
+    @Test
+    void resumeTask_shouldThrowSdkQueryException_whenDroneResumeCallbackReturnsFailure() {
+        stubTaskDetailSuccess(STATUS_PAUSED, DOCK_SN);
+        stubDroneResumeFailure();
+
+        assertThatThrownBy(() -> service.resumeTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("恢复任务失败");
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenGetTaskDetailFails() {
+        stubTaskDetailFailure();
+
+        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("查询任务详情失败");
+    }
+
+    @Test
+    void pauseTask_shouldThrowSdkQueryException_whenUpdateStatusFails() {
+        stubTaskDetailSuccess(STATUS_PENDING_START, DOCK_SN);
+        stubStatusCallbackFailure();
+
+        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
+                .isInstanceOf(SdkBridge.SdkQueryException.class)
+                .hasMessageContaining("暂停任务失败");
     }
 
     @Test
@@ -150,15 +390,6 @@ class SdkFlightTaskCommandServiceTest {
         service.cancelTask(TASK_UUID);
 
         assertThat(capturedStatus).isEqualTo(STATUS_TERMINATED);
-    }
-
-    @Test
-    void pauseTask_shouldThrowSdkQueryException_whenCallbackReturnsFailure() {
-        stubStatusCallbackFailure();
-
-        assertThatThrownBy(() -> service.pauseTask(TASK_UUID))
-                .isInstanceOf(SdkBridge.SdkQueryException.class)
-                .hasMessageContaining("暂停");
     }
 
     @Test
@@ -402,6 +633,78 @@ class SdkFlightTaskCommandServiceTest {
             sb.append(event.getFormattedMessage()).append('\n');
         }
         return sb.toString();
+    }
+
+    /**
+     * 桩定任务详情查询回调：以指定状态与 SN 返回详情。
+     */
+    private void stubTaskDetailSuccess(int status, String sn) {
+        TaskDetail detail = new TaskDetail();
+        detail.setUuid(TASK_UUID);
+        detail.setStatus(status);
+        detail.setSn(sn);
+        doAnswer(invocation -> {
+            FlightHubCallback.GetFlightTaskDetailCallback cb = invocation.getArgument(1);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.SUCCESS), detail);
+            return null;
+        }).when(flightTaskModule).getFlightTaskDetail(
+                anyString(), any(FlightHubCallback.GetFlightTaskDetailCallback.class));
+    }
+
+    /**
+     * 桩定任务详情查询回调：以失败错误完成回调。
+     */
+    private void stubTaskDetailFailure() {
+        doAnswer(invocation -> {
+            FlightHubCallback.GetFlightTaskDetailCallback cb = invocation.getArgument(1);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.ERROR_INVALID_PARAM), null);
+            return null;
+        }).when(flightTaskModule).getFlightTaskDetail(
+                anyString(), any(FlightHubCallback.GetFlightTaskDetailCallback.class));
+    }
+
+    /**
+     * 桩定无人机暂停回调成功。
+     */
+    private void stubDronePauseSuccess() {
+        doAnswer(invocation -> {
+            FlightHubCallback.ResultCallbackWithError cb = invocation.getArgument(0);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.SUCCESS));
+            return null;
+        }).when(flightTaskControlModule).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    /**
+     * 桩定无人机暂停回调失败。
+     */
+    private void stubDronePauseFailure() {
+        doAnswer(invocation -> {
+            FlightHubCallback.ResultCallbackWithError cb = invocation.getArgument(0);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.ERROR_OPERATION_FAILED));
+            return null;
+        }).when(flightTaskControlModule).pause(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    /**
+     * 桩定无人机恢复回调成功。
+     */
+    private void stubDroneResumeSuccess() {
+        doAnswer(invocation -> {
+            FlightHubCallback.ResultCallbackWithError cb = invocation.getArgument(0);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.SUCCESS));
+            return null;
+        }).when(flightTaskControlModule).resume(any(FlightHubCallback.ResultCallbackWithError.class));
+    }
+
+    /**
+     * 桩定无人机恢复回调失败。
+     */
+    private void stubDroneResumeFailure() {
+        doAnswer(invocation -> {
+            FlightHubCallback.ResultCallbackWithError cb = invocation.getArgument(0);
+            cb.onResult(new FlightHubError(FlightHubSdkErrorCode.ERROR_OPERATION_FAILED));
+            return null;
+        }).when(flightTaskControlModule).resume(any(FlightHubCallback.ResultCallbackWithError.class));
     }
 
     /**

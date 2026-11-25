@@ -31,10 +31,39 @@ export interface FH2InitConfig {
  * loadCockpit 第一个参数为挂载目标 DOM 元素的 id 字符串（如 'cockpit-app-container'），
  * 不是元素引用。
  */
+/** 自定义拓展按钮契约 */
+export interface FH2CustomButton {
+  id: string
+  name: string
+  tips?: string
+  cb: () => void
+}
+
+/** 驾驶舱自定义配置项 */
+export interface FH2CockpitConfigOptions {
+  modules?: {
+    topBar?: {
+      features?: {
+        customButtons?: FH2CustomButton[]
+      }
+    }
+    mainLive?: {
+      features?: {
+        footerItems?: {
+          customButtons?: FH2CustomButton[]
+        }
+      }
+    }
+    [key: string]: unknown
+  }
+  [key: string]: unknown
+}
+
 export interface FH2CockpitConfig {
   gateway_sn: string
   drone_sn?: string
   map?: boolean
+  cockpitConfig?: FH2CockpitConfigOptions
 }
 
 /** FH2 SDK 主题参数（setTheme 前瞻声明，当前 SDK 版本暂不支持，ThemeBus 就绪后自动生效） */

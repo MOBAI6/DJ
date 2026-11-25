@@ -24,14 +24,16 @@ import { createReadStream, statSync, cpSync, existsSync, rmSync } from 'node:fs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 /**
- * 开发模式下从 node_modules/cesium/Build/Cesium 提供静态文件。
- * 生产构建通过 package.json build 脚本拷贝到 dist/cesium/。
+ * Cesium 插件：
+ * - 开发模式：通过中间件由 node_modules/cesium/Build/Cesium 提供静态文件
+ * - 源码转换：将 import * as Cesium from 'cesium' 替换为 window.Cesium 全局引用
+ * - 生产构建：在 closeBundle 钩子中将 Cesium 静态资源拷贝至 dist/cesium/
  */
-function cesiumDevPlugin(): Plugin {
+function cesiumPlugin(): Plugin {
   const cesiumRoot = resolve(__dirname, 'node_modules/cesium/Build/Cesium')
   return {
-    name: 'vite-plugin-cesium-dev',
-    apply: 'serve',
+    name: 'vite-plugin-cesium',
+    enforce: 'pre',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = req.url ?? ''
@@ -66,6 +68,27 @@ function cesiumDevPlugin(): Plugin {
           next()
         }
       })
+    },
+    transform(code, id) {
+      const cleanId = id.split('?')[0]
+      if (/\.(ts|vue|js)$/.test(cleanId) && code.includes('cesium')) {
+        return {
+          code: code.replace(
+            /import\s+\*\s+as\s+Cesium\s+from\s+['"]cesium['"];?/g,
+            "const Cesium = (typeof window !== 'undefined' ? window.Cesium : (globalThis as any).Cesium);",
+          ),
+          map: null,
+        }
+      }
+    },
+    closeBundle() {
+      const dest = resolve(__dirname, 'dist/cesium')
+      if (existsSync(cesiumRoot)) {
+        cpSync(cesiumRoot, dest, { recursive: true })
+        console.log(`[vite-plugin-cesium] 已拷贝 Cesium 静态资源到 ${dest}`)
+      } else {
+        console.warn(`[vite-plugin-cesium] 未找到 ${cesiumRoot}，跳过拷贝`)
+      }
     },
   }
 }
@@ -141,11 +164,9 @@ function copyUserGuidePlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [vue(), basicSsl(), cesiumDevPlugin(), copyUserGuidePlugin()],
-  resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
-    },
+  plugins: [cesiumPlugin(), vue(), ...(process.env.VITE_SSL === 'true' ? [basicSsl()] : []), copyUserGuidePlugin()],
+  optimizeDeps: {
+    exclude: ['cesium', '@cesium/engine', '@cesium/widgets'],
   },
   build: {
     rollupOptions: {
@@ -153,6 +174,11 @@ export default defineConfig({
       output: {
         globals: { cesium: 'Cesium' },
       },
+    },
+  },
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
   server: {

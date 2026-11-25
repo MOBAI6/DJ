@@ -23,6 +23,7 @@
         <module>feature/feature-flight-area</module>
         <module>feature/feature-dashboard</module>
         <module>feature/feature-wayline</module>
+        <module>feature/feature-sei-osd</module>
         <module>app/fh-skeleton-app</module>
     </modules>
 
